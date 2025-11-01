@@ -27,30 +27,25 @@ class BluetoothHybridManager:
     def __init__(self):
         self.known_devices_file = "bluetooth_devices.json"
         self.known_devices: Dict[str, str] = self.load_known_devices()
-        
-        # BleakClient 관리 (배터리 정보용)
-        self.connected_clients: Dict[str, BleakClient] = {}  # {address: BleakClient}
-        self.device_names: Dict[str, str] = {}  # {address: name}
-        
         self.check_dependencies()
     
     def check_dependencies(self):
         """필요한 시스템 도구가 설치되어 있는지 확인"""
-        tools = {
-            "blueutil": "brew install blueutil",
-            "SwitchAudioSource": "brew install switchaudio-osx",
-            "nowplaying-cli": "brew install nowplaying-cli"
-        }
+        tools = [
+            "blueutil",
+            "SwitchAudioSource",
+            "nowplaying-cli"
+        ]
         
         missing = []
-        for tool, install_cmd in tools.items():
+        for tool in tools:
             result = subprocess.run(
                 ["which", tool],
                 capture_output=True,
                 text=True
             )
             if result.returncode != 0:
-                missing.append(f"  ❌ {tool} - 설치: {install_cmd}")
+                missing.append(f"❌ {tool}")
         
         if missing:
             print("⚠️  필수 도구가 설치되어 있지 않습니다:")
@@ -78,59 +73,6 @@ class BluetoothHybridManager:
                 json.dump(self.known_devices, f, indent=2)
         except Exception as e:
             print(f"⚠️  장치 목록 저장 실패: {e}")
-    
-    def get_system_battery_info(self, address: str) -> Optional[int]:
-        """
-        macOS 시스템에서 블루투스 장치의 배터리 정보 조회
-        (ioreg를 사용 - 제어센터에서 보이는 배터리 정보를 가져옴)
-        """
-        try:
-            # ioreg로 블루투스 장치 정보 조회
-            result = subprocess.run(
-                ["ioreg", "-r", "-c", "IOBluetoothDevice"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            
-            if result.returncode != 0:
-                return None
-            
-            # 정규화된 주소 (대소문자 무시, - 를 : 로 통일)
-            normalized_target = address.lower().replace('-', ':')
-            
-            # 출력 파싱 - 장치별로 그룹화
-            lines = result.stdout.split('\n')
-            current_device_info = {}
-            
-            for i, line in enumerate(lines):
-                # Address 찾기
-                if '"Address"' in line:
-                    parts = line.split('=')
-                    if len(parts) >= 2:
-                        addr = parts[1].strip().strip('"').lower().replace('-', ':')
-                        current_device_info['address'] = addr
-                
-                # 배터리 퍼센트 찾기
-                if '"BatteryPercent"' in line:
-                    parts = line.split('=')
-                    if len(parts) >= 2:
-                        try:
-                            battery_str = parts[1].strip()
-                            # 숫자만 추출
-                            battery = int(''.join(filter(str.isdigit, battery_str)))
-                            
-                            # 현재 장치 주소와 일치하는지 확인
-                            if 'address' in current_device_info:
-                                if current_device_info['address'] == normalized_target:
-                                    return battery
-                        except (ValueError, IndexError):
-                            pass
-            
-            return None
-            
-        except Exception:
-            return None
     
     def get_paired_devices(self) -> List[Dict[str, str]]:
         """macOS에 페어링된 Bluetooth 장치 목록"""
@@ -175,7 +117,7 @@ class BluetoothHybridManager:
             return []
     
     async def scan_ble_devices(self, timeout: float = 5.0) -> List[Dict[str, str]]:
-        """BLE 장치 스캔 (추가 장치 발견용)"""
+        """BLE 장치 스캔"""
         try:
             print(f"🔍 BLE 장치 스캔 중 ({timeout}초)...")
             
@@ -217,22 +159,16 @@ class BluetoothHybridManager:
         ble_devices = await self.scan_ble_devices(timeout=5.0)
         print(f"   BLE 장치: {len(ble_devices)}개")
         
-        # 3. 장치 매칭 (여러 방법 시도)
-        paired_by_name = {d['name'].lower(): d for d in paired}
-        paired_by_address = {d['address'].lower(): d for d in paired}
-        
+        # 3. 장치 매칭 (이름으로 매칭)
         ble_by_name = {}
-        ble_by_address = {}
         
         for ble_dev in ble_devices:
             name_key = ble_dev['name'].lower()
-            addr_key = ble_dev['address'].lower()
             
             # 같은 이름의 BLE 장치가 여러 개면 리스트로 저장
             if name_key not in ble_by_name:
                 ble_by_name[name_key] = []
             ble_by_name[name_key].append(ble_dev)
-            ble_by_address[addr_key] = ble_dev
         
         all_devices = []
         processed_ble_addresses = set()
@@ -271,8 +207,20 @@ class BluetoothHybridManager:
         return all_devices
     
     def connect_device_system(self, address: str, name: str = "Unknown") -> bool:
-        """macOS 시스템 Bluetooth로 장치 연결 (오디오용)"""
+        """
+        macOS 시스템 Bluetooth로 장치 연결 (오디오용)
+        UUID 형식이면 시스템 연결은 실패하지만 BLE GATT는 사용 가능
+        """
         try:
+            # UUID 형식인 경우 (BLE 전용 장치)
+            if "-" in address and len(address) == 36:
+                print(f"\n⚠️  '{name}'는 BLE 전용 장치입니다.")
+                print("   시스템 블루투스 연결은 불가능하지만, GATT 기능(배터리 읽기 등)은 사용 가능합니다.")
+                # GATT는 사용 가능하므로 장치 목록에는 추가
+                self.known_devices[address] = name
+                self.save_known_devices()
+                return True  # GATT 용도로는 사용 가능
+            
             print(f"\n📱 '{name}' 시스템 블루투스 연결 중...")
             
             result = subprocess.run(
@@ -300,92 +248,6 @@ class BluetoothHybridManager:
             print(f"❌ 시스템 연결 중 오류: {e}")
             return False
     
-    async def connect_device_gatt(self, address: str, name: str = "Unknown", timeout: float = 15.0) -> bool:
-        """BleakClient로 GATT 연결 (배터리 정보용)"""
-        # 이미 연결되어 있는지 확인
-        if address in self.connected_clients:
-            if self.connected_clients[address].is_connected:
-                print(f"⚠️  GATT 이미 연결됨: {name}")
-                return True
-            else:
-                # 연결이 끊긴 경우 제거
-                del self.connected_clients[address]
-                if address in self.device_names:
-                    del self.device_names[address]
-        
-        try:
-            print(f"🔗 '{name}' GATT 연결 중 (배터리 정보용, 최대 {timeout}초)...")
-            client = BleakClient(address, timeout=timeout)
-            await client.connect()
-            
-            if client.is_connected:
-                self.connected_clients[address] = client
-                self.device_names[address] = name
-                print("✅ GATT 연결 성공! (배터리 정보 사용 가능)")
-                
-                # 서비스 정보 확인 (디버깅용)
-                try:
-                    services = client.services
-                    print(f"   📋 발견된 서비스: {len(services)}개")
-                except Exception:
-                    pass
-                
-                return True
-            else:
-                print("⚠️  GATT 연결 실패 (배터리 정보 사용 불가)")
-                return False
-                
-        except asyncio.TimeoutError:
-            print(f"⏱️  GATT 연결 타임아웃 ({timeout}초 초과)")
-            print("   💡 장치가 너무 멀거나 GATT 프로토콜을 지원하지 않을 수 있습니다.")
-            return False
-        except Exception as e:
-            print(f"⚠️  GATT 연결 실패: {e}")
-            print("   💡 시스템 블루투스로 연결을 시도합니다.")
-            return False
-    
-    async def connect_device_hybrid(self, address: str, name: str = "Unknown") -> bool:
-        """
-        간소화된 하이브리드 연결: 시스템 블루투스 우선
-        - 시스템 블루투스: 오디오, 미디어 제어
-        - 배터리 정보: 필요할 때 임시 GATT 읽기
-        
-        핵심: 시스템 연결 후에도 BleakClient로 읽기 가능!
-        """
-        print(f"\n🔄 장치 연결 시작: {name}")
-        print("=" * 80)
-        
-        # 시스템 블루투스 연결
-        system_success = self.connect_device_system(address, name)
-        
-        if not system_success:
-            print("\n❌ 연결 실패")
-            return False
-        
-        print("\n✅ 연결 성공!")
-        print("💡 배터리 정보는 'battery' 명령어로 조회할 수 있습니다.")
-        print("=" * 80)
-        
-        return True
-    
-    async def disconnect_device_gatt(self, address: str):
-        """GATT 연결 해제"""
-        if address not in self.connected_clients:
-            return
-        
-        client = self.connected_clients[address]
-        name = self.device_names.get(address, "Unknown")
-        
-        try:
-            if client.is_connected:
-                await client.disconnect()
-                print(f"🔌 GATT 연결 해제됨: {name}")
-        except Exception as e:
-            print(f"⚠️  GATT 연결 해제 중 오류: {e}")
-        
-        del self.connected_clients[address]
-        if address in self.device_names:
-            del self.device_names[address]
     
     def disconnect_device_system(self, address: str, name: str = "Unknown") -> bool:
         """시스템 블루투스 연결 해제"""
@@ -410,10 +272,6 @@ class BluetoothHybridManager:
             print(f"❌ 시스템 연결 해제 중 오류: {e}")
             return False
     
-    async def disconnect_device_hybrid(self, address: str, name: str = "Unknown"):
-        """하이브리드 연결 해제 (시스템 블루투스만)"""
-        # 시스템 블루투스 연결 해제
-        self.disconnect_device_system(address, name)
     
     def get_audio_devices(self) -> List[str]:
         """사용 가능한 오디오 출력 장치 목록"""
@@ -492,12 +350,6 @@ class BluetoothHybridManager:
             
             if result.returncode == 0:
                 print("✅ 재생/일시정지 완료")
-                
-                # 현재 재생 정보 표시
-                info = self.get_now_playing_info()
-                if info:
-                    print(f"🎵 {info}")
-                
                 return True
             
             print("⚠️  미디어 제어 실패")
@@ -521,14 +373,6 @@ class BluetoothHybridManager:
             
             if result.returncode == 0:
                 print("✅ 다음 트랙")
-                
-                # 현재 재생 정보 표시
-                import time
-                time.sleep(0.5)
-                info = self.get_now_playing_info()
-                if info:
-                    print(f"🎵 {info}")
-                
                 return True
             
             return False
@@ -551,14 +395,6 @@ class BluetoothHybridManager:
             
             if result.returncode == 0:
                 print("✅ 이전 트랙")
-                
-                # 현재 재생 정보 표시
-                import time
-                time.sleep(0.5)
-                info = self.get_now_playing_info()
-                if info:
-                    print(f"🎵 {info}")
-                
                 return True
             
             return False
@@ -632,7 +468,7 @@ class BluetoothHybridManager:
             address: 장치 주소 (MAC)
             uuid: 읽을 특성의 UUID (예: "00002a19-0000-1000-8000-00805f9b34fb")
             name: 장치 이름
-            ble_address: BLE UUID (있으면 이것을 사용)
+            ble_address: BLE UUID
             is_connected: 시스템에 연결되어 있는지 여부
         
         Returns:
@@ -641,20 +477,24 @@ class BluetoothHybridManager:
         try:
             print(f"\n📖 {name}에서 UUID {uuid} 읽기 시도...")
             
-            # BLE UUID가 있으면 그것을 사용, 없으면 MAC 주소 사용
-            target_address = ble_address if ble_address else address
-            print(f"   연결 주소: {target_address}")
+            # BLE UUID 필수
+            if not ble_address:
+                print("❌ BLE UUID가 없어 GATT 연결을 할 수 없습니다.")
+                print("   💡 'gatt' 명령어는 BLE UUID가 있는 장치만 사용 가능합니다.")
+                return None
+            
+            print(f"   BLE 주소: {ble_address}")
             
             # 시스템에 연결되어 있으면 먼저 해제
             if is_connected:
-                print(f"⚠️  장치가 시스템에 연결되어 있습니다.")
-                print(f"   GATT 연결을 위해 시스템 연결을 일시적으로 해제합니다...")
+                print("⚠️  장치가 시스템에 연결되어 있습니다.")
+                print("   GATT 연결을 위해 시스템 연결을 일시적으로 해제합니다...")
                 self.disconnect_device_system(address, name)
                 await asyncio.sleep(2)
             
             # GATT 연결
-            print(f"   BleakClient로 연결 시도 중...")
-            client = BleakClient(target_address, timeout=15.0)
+            print("   BleakClient로 연결 시도 중...")
+            client = BleakClient(ble_address, timeout=15.0)
             await client.connect()
             
             if not client.is_connected:
@@ -709,20 +549,24 @@ class BluetoothHybridManager:
             print(f"   데이터 (bytes): {data}")
             print(f"   데이터 (hex): {data.hex()}")
             
-            # BLE UUID가 있으면 그것을 사용, 없으면 MAC 주소 사용
-            target_address = ble_address if ble_address else address
-            print(f"   연결 주소: {target_address}")
+            # BLE UUID 필수
+            if not ble_address:
+                print("❌ BLE UUID가 없어 GATT 연결을 할 수 없습니다.")
+                print("   💡 이 장치는 BLE UUID가 없어서 GATT 작업이 불가능합니다.")
+                return False
+            
+            print(f"   BLE 주소: {ble_address}")
             
             # 시스템에 연결되어 있으면 먼저 해제
             if is_connected:
-                print(f"⚠️  장치가 시스템에 연결되어 있습니다.")
-                print(f"   GATT 연결을 위해 시스템 연결을 일시적으로 해제합니다...")
+                print("⚠️  장치가 시스템에 연결되어 있습니다.")
+                print("   GATT 연결을 위해 시스템 연결을 일시적으로 해제합니다...")
                 self.disconnect_device_system(address, name)
                 await asyncio.sleep(2)
             
             # GATT 연결
-            print(f"   BleakClient로 연결 시도 중...")
-            client = BleakClient(target_address, timeout=15.0)
+            print("   BleakClient로 연결 시도 중...")
+            client = BleakClient(ble_address, timeout=15.0)
             await client.connect()
             
             if not client.is_connected:
@@ -761,20 +605,24 @@ class BluetoothHybridManager:
         try:
             print(f"\n🔍 {name}의 GATT 서비스/특성 탐색 중...")
             
-            # BLE UUID가 있으면 그것을 사용, 없으면 MAC 주소 사용
-            target_address = ble_address if ble_address else address
-            print(f"   연결 주소: {target_address}")
+            # BLE UUID 필수
+            if not ble_address:
+                print("❌ BLE UUID가 없어 GATT 연결을 할 수 없습니다.")
+                print("   💡 이 장치는 BLE UUID가 없어서 GATT 작업이 불가능합니다.")
+                return
+            
+            print(f"   BLE 주소: {ble_address}")
             
             # 시스템에 연결되어 있으면 먼저 해제
             if is_connected:
-                print(f"⚠️  장치가 시스템에 연결되어 있습니다.")
-                print(f"   GATT 연결을 위해 시스템 연결을 일시적으로 해제합니다...")
+                print("⚠️  장치가 시스템에 연결되어 있습니다.")
+                print("   GATT 연결을 위해 시스템 연결을 일시적으로 해제합니다...")
                 self.disconnect_device_system(address, name)
                 await asyncio.sleep(2)  # 연결 해제 대기
             
             # GATT 연결
-            print(f"   BleakClient로 연결 시도 중...")
-            client = BleakClient(target_address, timeout=15.0)
+            print("   BleakClient로 연결 시도 중...")
+            client = BleakClient(ble_address, timeout=15.0)
             await client.connect()
             
             if not client.is_connected:
@@ -805,10 +653,6 @@ class BluetoothHybridManager:
                             print(f"      현재값 (bytes): {value}")
                             print(f"      현재값 (hex): {value.hex()}")
                             print(f"      현재값 (int): {list(value)}")
-                            
-                            # 특별한 값 해석 (배터리 등)
-                            if "battery" in char.description.lower() and len(value) == 1:
-                                print(f"      👉 배터리: {value[0]}%")
                         except Exception as e:
                             # 읽기 실패는 정상 - 일부 특성은 읽기가 거부됨
                             error_msg = str(e)
@@ -825,223 +669,6 @@ class BluetoothHybridManager:
             
         except Exception as e:
             print(f"❌ 서비스 탐색 실패: {e}")
-    
-    # ==================== 배터리 정보 기능 (bluetooth_manager_multi.py에서 이식) ====================
-    
-    async def get_battery_level_direct(self, address: str, name: str = "Unknown", ble_address: Optional[str] = None, is_connected: bool = False) -> Optional[int]:
-        """
-        시스템 블루투스로 연결된 장치의 배터리 정보를 읽기
-        1순위: macOS 시스템 배터리 정보 (ioreg)
-        2순위: GATT로 직접 읽기 (BleakClient)
-        """
-        print(f"🔋 {name} 배터리 정보를 조회합니다...")
-        
-        # 1. 시스템 배터리 정보 먼저 시도 (가장 빠르고 안정적)
-        print("   [방법 1] macOS 시스템 배터리 정보 확인 중...")
-        battery = self.get_system_battery_info(address)
-        
-        if battery is not None:
-            # 배터리 레벨에 따른 이모지
-            if battery >= 80:
-                emoji = "🔋"
-            elif battery >= 50:
-                emoji = "🔋"
-            elif battery >= 20:
-                emoji = "🪫"
-            else:
-                emoji = "🪫"
-            
-            print(f"   {emoji} {name} 배터리: {battery}% (시스템 정보)")
-            return battery
-        
-        print("   ⚠️  시스템 배터리 정보 없음")
-        
-        # 2. GATT로 직접 읽기 시도
-        print("   [방법 2] GATT로 배터리 정보 읽기 시도 중...")
-        
-        # BLE UUID 우선 사용
-        target_address = ble_address if ble_address else address
-        print(f"   연결 주소: {target_address}")
-        
-        # 시스템에 연결되어 있으면 먼저 해제
-        if is_connected:
-            print(f"   ⚠️  장치가 시스템에 연결되어 있습니다.")
-            print(f"   GATT 연결을 위해 시스템 연결을 일시적으로 해제합니다...")
-            self.disconnect_device_system(address, name)
-            await asyncio.sleep(2)
-        
-        try:
-            # 임시 BleakClient로 읽기만 시도
-            print(f"   BleakClient로 연결 시도 중...")
-            client = BleakClient(target_address, timeout=10.0)
-            await client.connect()
-            
-            if not client.is_connected:
-                print("   ⚠️  GATT 연결 실패")
-                return None
-            
-            try:
-                # 표준 Battery Service UUID
-                BATTERY_SERVICE_UUID = "0000180f-0000-1000-8000-00805f9b34fb"
-                BATTERY_LEVEL_CHAR_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
-                
-                services = client.services
-                
-                # 배터리 서비스에서 레벨 찾기 (handle 사용)
-                for service in services:
-                    if BATTERY_SERVICE_UUID.lower() in service.uuid.lower():
-                        for char in service.characteristics:
-                            if BATTERY_LEVEL_CHAR_UUID.lower() in char.uuid.lower():
-                                try:
-                                    # handle 사용 (같은 UUID가 여러 개 있을 수 있음)
-                                    value = await client.read_gatt_char(char.handle)
-                                    battery_level = int(value[0])
-                                    
-                                    # 배터리 레벨에 따른 이모지
-                                    if battery_level >= 80:
-                                        emoji = "🔋"
-                                    elif battery_level >= 50:
-                                        emoji = "🔋"
-                                    elif battery_level >= 20:
-                                        emoji = "🪫"
-                                    else:
-                                        emoji = "🪫"
-                                    
-                                    print(f"   {emoji} {name} 배터리: {battery_level}% (GATT, handle={char.handle})")
-                                    await client.disconnect()
-                                    return battery_level
-                                except Exception:
-                                    # 첫 번째 배터리 서비스 실패 시 다음 시도
-                                    continue
-                
-                # 모든 서비스 탐색 (handle 사용)
-                for service in services:
-                    for char in service.characteristics:
-                        if BATTERY_LEVEL_CHAR_UUID.lower() in char.uuid.lower():
-                            try:
-                                value = await client.read_gatt_char(char.handle)
-                                battery_level = int(value[0])
-                                print(f"   🔋 {name} 배터리: {battery_level}% (GATT, handle={char.handle})")
-                                await client.disconnect()
-                                return battery_level
-                            except Exception:
-                                continue
-                
-                print("   ⚠️  배터리 서비스를 찾을 수 없습니다.")
-                await client.disconnect()
-                return None
-                
-            except Exception as e:
-                print(f"   ❌ GATT 읽기 실패: {e}")
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-                return None
-                
-        except Exception as e:
-            print(f"   ⚠️  GATT 연결 실패: {e}")
-            return None
-    
-    async def get_battery_level(self, address: str) -> Optional[int]:
-        """
-        특정 Bluetooth 장치의 배터리 레벨을 가져옵니다.
-        
-        Args:
-            address: 장치 주소
-        
-        Returns:
-            배터리 퍼센트 (0-100) 또는 None
-        """
-        if address not in self.connected_clients:
-            print("⚠️  GATT 연결이 없어 배터리 정보를 조회할 수 없습니다.")
-            print("   💡 장치를 다시 연결하면 GATT 연결이 시도됩니다.")
-            return None
-        
-        client = self.connected_clients[address]
-        name = self.device_names.get(address, "Unknown")
-        
-        if not client.is_connected:
-            print(f"⚠️  {name} GATT 연결이 끊어졌습니다.")
-            return None
-        
-        try:
-            # 표준 Battery Service UUID
-            BATTERY_SERVICE_UUID = "0000180f-0000-1000-8000-00805f9b34fb"
-            BATTERY_LEVEL_CHAR_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
-            
-            print(f"🔋 {name} 배터리 정보를 요청합니다...")
-            
-            # 배터리 서비스 찾기
-            services = client.services
-            battery_service = None
-            
-            for service in services:
-                if BATTERY_SERVICE_UUID.lower() in service.uuid.lower():
-                    battery_service = service
-                    break
-            
-            if not battery_service:
-                print(f"⚠️  {name}에서 배터리 서비스를 찾을 수 없습니다.")
-                # 모든 서비스에서 배터리 레벨 특성 찾기 시도
-                for service in services:
-                    for char in service.characteristics:
-                        if BATTERY_LEVEL_CHAR_UUID.lower() in char.uuid.lower():
-                            try:
-                                value = await client.read_gatt_char(char.uuid)
-                                battery_level = int(value[0])
-                                print(f"🔋 {name} 배터리: {battery_level}%")
-                                return battery_level
-                            except Exception as e:
-                                print(f"배터리 정보 읽기 실패: {e}")
-                return None
-            
-            # 배터리 레벨 특성 찾기
-            for char in battery_service.characteristics:
-                if BATTERY_LEVEL_CHAR_UUID.lower() in char.uuid.lower():
-                    try:
-                        value = await client.read_gatt_char(char.uuid)
-                        battery_level = int(value[0])
-                        
-                        # 배터리 레벨에 따른 이모지 선택
-                        if battery_level >= 80:
-                            emoji = "🔋"
-                        elif battery_level >= 50:
-                            emoji = "🔋"
-                        elif battery_level >= 20:
-                            emoji = "🪫"
-                        else:
-                            emoji = "🪫"
-                        
-                        print(f"{emoji} {name} 배터리: {battery_level}%")
-                        return battery_level
-                    except Exception as e:
-                        print(f"❌ 배터리 정보 읽기 실패: {e}")
-                        return None
-            
-            print(f"⚠️  {name}에서 배터리 레벨 특성을 찾을 수 없습니다.")
-            return None
-            
-        except Exception as e:
-            print(f"❌ 배터리 정보 조회 실패: {e}")
-            return None
-    
-    async def get_all_battery_levels(self):
-        """GATT 연결된 모든 장치의 배터리 레벨을 가져옵니다."""
-        if not self.connected_clients:
-            print("⚠️  GATT 연결된 장치가 없습니다.")
-            print("   💡 배터리 정보를 보려면 장치를 연결해주세요.")
-            return
-        
-        print("\n🔋 모든 장치의 배터리 정보:")
-        print("=" * 80)
-        
-        for address in self.connected_clients.keys():
-            await self.get_battery_level(address)
-            await asyncio.sleep(0.2)  # 장치 간 짧은 딜레이
-        
-        print("=" * 80)
-
 
 async def main():
     """메인 함수 - 다중 장치 관리"""
@@ -1061,9 +688,8 @@ async def main():
         print("=" * 80)
         print("  1. 장치 검색 및 연결")
         print("  2. 연결된 장치 목록")
-        print("  3. 장치 제어")
-        print("  4. 모든 장치 배터리 확인")
-        print("  5. 미디어 제어")
+        print("  3. 장치 제어 (GATT 읽기/쓰기)")
+        print("  4. 미디어 제어")
         print("  0. 종료")
         print("\n선택: ", end="")
         
@@ -1175,25 +801,16 @@ async def main():
                             print(f"\n{'='*80}")
                             print(f"🎛️  {selected_device['name']} 제어")
                             print("=" * 80)
-                            print("  battery - 배터리 정보 🔋")
                             print("  gatt    - GATT 서비스/특성 탐색 🔍")
-                            print("  read    - UUID로 특성 읽기 📖")
-                            print("  write   - UUID로 특성 쓰기 ✍️")
+                            print("  read    - UUID/Handle로 특성 읽기 📖")
+                            print("  write   - UUID/Handle로 특성 쓰기 ✍️")
                             print("  disc    - 연결 해제")
                             print("  back    - 뒤로")
                             print("\n명령: ", end="")
                             
                             cmd = input().strip().lower()
                             
-                            if cmd == "battery":
-                                await manager.get_battery_level_direct(
-                                    selected_device['address'],
-                                    selected_device['name'],
-                                    selected_device.get('ble_address'),
-                                    selected_device.get('connected', False)
-                                )
-                            
-                            elif cmd == "gatt":
+                            if cmd == "gatt":
                                 await manager.list_all_services_and_characteristics(
                                     selected_device['address'],
                                     selected_device['name'],
@@ -1259,23 +876,6 @@ async def main():
                     print("올바른 숫자를 입력하세요.")
             
             elif choice == "4":
-                # 모든 장치 배터리 확인
-                if not connected_devices:
-                    print("\n⚠️  연결된 장치가 없습니다.")
-                else:
-                    print("\n🔋 모든 장치의 배터리 정보:")
-                    print("=" * 80)
-                    for address, device in connected_devices.items():
-                        await manager.get_battery_level_direct(
-                            device['address'],
-                            device['name'],
-                            device.get('ble_address'),
-                            device.get('connected', False)
-                        )
-                        await asyncio.sleep(0.3)
-                    print("=" * 80)
-            
-            elif choice == "5":
                 # 미디어 제어
                 print("\n🎵 범용 미디어 제어")
                 print("=" * 80)
