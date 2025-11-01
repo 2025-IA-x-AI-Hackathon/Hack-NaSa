@@ -45,5 +45,13 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>BLE 광고를 감지하여 기기를 찾기 위해 사용합니다.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>BLE 기능 사용이 필요합니다.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
 </dict>
 </plist>
