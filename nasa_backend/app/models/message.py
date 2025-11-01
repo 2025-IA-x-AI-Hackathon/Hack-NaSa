@@ -2,13 +2,14 @@
 WebSocket 메시지 모델 스키마
 """
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional
 
 
 class PredictionMessage(BaseModel):
     """Windows 딥러닝 클라이언트로부터 받는 예측 메시지"""
     type: str = Field(default="prediction", description="메시지 타입")
-    result: List[float] = Field(..., description="딥러닝 모델 예측 결과 (예: [0.85, 0.12, 0.03])")
+    detected_action: int = Field(..., description="감지된 행동 ID (0: 감지 없음, 1: 행동1, 2: 행동2, 3: 행동3)")
+    confidence: float = Field(..., description="신뢰도 (0.0 ~ 1.0)")
     timestamp: float = Field(..., description="타임스탬프")
     metadata: Optional[dict] = Field(None, description="추가 메타데이터 (선택)")
 
