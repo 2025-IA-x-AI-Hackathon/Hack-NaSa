@@ -177,9 +177,20 @@ class BluetoothHybridManager:
         print(f"\n   매칭 중...")
         for device in paired:
             name_key = device['name'].lower()
+            mac_address = device['address'].strip()  # 공백 제거
             
+            # 디버깅: MAC 주소 정보 출력
+            has_dash = "-" in mac_address
+            mac_len = len(mac_address)
+            
+            # MAC 주소가 UUID 형식이면 그 자체가 BLE 주소!
+            is_uuid = has_dash and mac_len == 36
+            
+            if is_uuid:
+                device['ble_address'] = mac_address
+                print(f"   ✅ {device['name']}: MAC={mac_address}, BLE={mac_address} (UUID 형식)")
             # 방법 1: 이름으로 매칭
-            if name_key in ble_by_name:
+            elif name_key in ble_by_name:
                 ble_matches = ble_by_name[name_key]
                 if len(ble_matches) == 1:
                     # 유일한 매칭
@@ -201,6 +212,10 @@ class BluetoothHybridManager:
         # 5. BLE 전용 장치 추가 (페어링 안 된 것들)
         for ble_dev in ble_devices:
             if ble_dev['address'].lower() not in processed_ble_addresses:
+                # BLE 장치도 UUID 형식이면 ble_address 설정
+                ble_address = ble_dev['address']
+                if 'ble_address' not in ble_dev:
+                    ble_dev['ble_address'] = ble_address
                 all_devices.append(ble_dev)
         
         print(f"\n   총 {len(all_devices)}개 장치 발견")
