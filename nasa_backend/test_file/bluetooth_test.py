@@ -789,7 +789,6 @@ async def main():
                 print("0. 취소")
                 print("\n선택: ", end="")
                 
-                
                 try:
                     dev_choice = int(input())
                     if dev_choice == 0:
