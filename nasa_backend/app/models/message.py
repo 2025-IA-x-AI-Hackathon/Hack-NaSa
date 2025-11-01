@@ -3,19 +3,6 @@ WebSocket 메시지 모델 스키마
 """
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from datetime import datetime
-
-
-class PhoneCommand(BaseModel):
-    """안드로이드 제어 명령"""
-    action: str = Field(..., description="명령 타입 (예: notify, vibrate)")
-    value: float = Field(..., description="예측값 (0.0 ~ 1.0)")
-
-
-class Command(BaseModel):
-    """IoT 기기 제어 명령"""
-    speaker: Optional[str] = Field(None, description="스피커 명령 (예: play_alert, play_normal)")
-    phone: Optional[PhoneCommand] = Field(None, description="안드로이드 명령")
 
 
 class PredictionMessage(BaseModel):
