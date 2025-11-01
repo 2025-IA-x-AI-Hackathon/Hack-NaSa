@@ -5,6 +5,7 @@ from fastapi import WebSocket
 from typing import List
 from datetime import datetime
 from app.models.message import PredictionMessage, ResponseMessage, ConnectionInfo
+from app.services.action_mapper import action_mapper
 import time
 
 
@@ -31,18 +32,24 @@ class ConnectionManager:
         print(f"❌ Windows 클라이언트 연결 해제 (남은 연결: {len(self.windows_clients)}개)")
 
     async def process_prediction(self, message: PredictionMessage) -> ResponseMessage:
-        """Windows로부터 받은 예측 결과 처리"""
+        """Windows로부터 받은 행동 감지 결과 처리"""
         self.connection_info.last_message_time = datetime.now().isoformat()
         self.connection_info.total_messages += 1
 
-        print(f"📊 예측 결과 수신: {message.result}")
+        print(f"📊 행동 감지 수신: ID={message.detected_action}, 신뢰도={message.confidence:.2%}")
 
-        # TODO: 예측 결과 기반 행동 결정 로직 구현
+        # ActionMapper에게 처리 위임
+        actions_taken = await action_mapper.process_and_execute(
+            detected_action=message.detected_action,
+            confidence=message.confidence
+        )
+
+        result_message = f"Actions: {', '.join(actions_taken)}" if actions_taken else "No actions taken"
 
         return ResponseMessage(
             status="processed",
             timestamp=time.time(),
-            message="Prediction received successfully"
+            message=result_message
         )
 
     def get_status(self) -> dict:
